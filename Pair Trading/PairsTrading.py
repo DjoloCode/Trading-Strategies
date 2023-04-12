@@ -66,9 +66,9 @@ def beta_rolling_window_table(S1, S2, window_size=250):
 def ratio(S1, S2, beta, use_log=False):
     '''Computes the residual of the cointegration of prices (if use_log=False) or log prices (if use_log=True)'''
     if not use_log:
-        ratio_ = S1 - beta*S2
+        ratio_ = beta*S1 - S2
     else:
-        ratio_ = np.log(S1) - beta*np.log(S2)
+        ratio_ = beta*np.log(S1) - np.log(S2)
     return ratio_
 
 
@@ -99,8 +99,10 @@ def tradePair(S1, S2, beta, ratio_mean, ratio_std, capital=1000, stop_loss=1., u
     # Start with no positions
     sharesS1, sharesS2 = [], []
     priceS1, priceS2 = [], []
-    weightS1 = 1 / (1 + beta)
-    weightS2 = beta * weightS1
+    weightS2 = 1 / (1 + beta)
+    weightS1 = beta * weightS2
+    # stopLossInd will take only 3 values: -1, 0, +1
+    stopLossInd = 0
     in_position = False
     dateOpenPosition, dateClosePosition = [], []
     profit_trade = []
@@ -112,6 +114,14 @@ def tradePair(S1, S2, beta, ratio_mean, ratio_std, capital=1000, stop_loss=1., u
     for i in range(len(ratios)):
         if (not in_position):
             dailyPnL.append(0)
+            # The stop loss indicator is used to avoid taking back to back trades once stopped out
+            # One scenario is that the trade is taken long at zscore -1, stopped out at zscore -2 (say),
+            # immediately followed by going long again despite being still in a downtrend on the zscore
+            # The indicator will be used to instruct to only take a trade once the zscore has returned
+            # above -1 (in this case) or +1 in the symmtric case
+            # This will reduce constantly stopped out trades in an unfavourably trending zscore
+            if (abs(zscore[i]) < 1):
+                stopLossInd = 0
         else:
             dailyPnL.append(sharesS1[-1]*(S1[i] - S1[i-1]) +
                             sharesS2[-1]*(S2[i] - S2[i-1]))
@@ -120,15 +130,17 @@ def tradePair(S1, S2, beta, ratio_mean, ratio_std, capital=1000, stop_loss=1., u
 
         # Define conditions for entering and exiting trades
         # This allows for easier modifications of the trading conditions
+        conditionStopLoss = currentTradeProfit < tradeStopLoss
         conditionEntry1 = (not in_position) and (
-            zscore[i] > 1) and (i < len(ratios)-1)
+            zscore[i] > 1) and (i < len(ratios)-1) and (stopLossInd != 1)
 
         conditionEntry2 = (not in_position) and (
-            zscore[i] < -1) and (i < len(ratios)-1)
+            zscore[i] < -1) and (i < len(ratios)-1) and (stopLossInd != -1)
 
         conditionExit1 = (in_position and (abs(zscore[i]) < 0.5
                                            or i == len(ratios) - 1
-                                           or currentTradeProfit < tradeStopLoss))
+                                           or conditionStopLoss))
+
         # Sell short if the z-score is > 1 and not last day
         if conditionEntry1:
             sharesS1.append(-weightS1 * capital / S1[i])
@@ -136,6 +148,7 @@ def tradePair(S1, S2, beta, ratio_mean, ratio_std, capital=1000, stop_loss=1., u
             priceS1.append(S1[i])
             priceS2.append(S2[i])
             dateOpenPosition.append(ratios.index[i])
+            stopLossInd = 0
             in_position = True
         # Buy long if the z-score is < 1 and not last day
         elif conditionEntry2:
@@ -144,6 +157,7 @@ def tradePair(S1, S2, beta, ratio_mean, ratio_std, capital=1000, stop_loss=1., u
             priceS1.append(S1[i])
             priceS2.append(S2[i])
             dateOpenPosition.append(ratios.index[i])
+            stopLossInd = 0
             in_position = True
 
         # Clear positions if
@@ -153,8 +167,9 @@ def tradePair(S1, S2, beta, ratio_mean, ratio_std, capital=1000, stop_loss=1., u
         elif conditionExit1:
             dateClosePosition.append(ratios.index[i])
             profit_trade.append(currentTradeProfit)
-            if currentTradeProfit < tradeStopLoss:
+            if conditionStopLoss:
                 print(f'stop loss triggered on: {ratios.index[i]}')
+                stopLossInd = np.sign(zscore[i])
             in_position = False
             currentTradeProfit = 0
 
